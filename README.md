@@ -1,7 +1,7 @@
-# Bustadice Profit-Vault Ladder
+# Bustadice Scripts
 
-An auto-betting script for the [Bustadice](https://bustadice.com) script editor, sized
-for a small (~$10) starting bankroll, plus the offline backtest harness used to validate it.
+Auto-betting / auto-skipping scripts for the [Bustadice](https://bustadice.com) script
+editor, plus the offline backtest harness used to validate them.
 
 **Read this before you run it live:** Bustadice has a fixed 1% house edge on every bet,
 independent of target, progression, or seed handling. **No script here — or anywhere —
@@ -11,10 +11,13 @@ how fat the tails are. That's what this one does — it does not, and cannot, cr
 
 ## Files
 
-- `scripts/profit-vault-ladder.js` — the strategy, ready to paste into the Bustadice
-  script editor.
+- `scripts/profit-vault-ladder.js` — the betting strategy, ready to paste into the
+  Bustadice script editor.
+- `scripts/skip-burst.js` — a no-money utility that fires `this.skip()` a configured
+  number of times at a paced interval, with progress counter and alerts. See below.
 - `tools/backtest.js` — zero-dependency Node harness (Monte Carlo, provably-fair seeded
-  replay, or historical roll replay) used to validate it before risking real money.
+  replay, or historical roll replay) used to validate the betting script before risking
+  real money.
 
 ## The strategy
 
@@ -124,6 +127,39 @@ ratio: P(hit TP first) ≈ SL/(SL+TP) before edge drag).
   instead of a smooth bleed. Treat the $10 as entertainment spend you're fully prepared
   to lose — because the math guarantees that's the modal long-run outcome of any
   strategy on this game.
+
+## `skip-burst.js`
+
+Fires `this.skip()` — the API's own no-wager way to consume a nonce and see what roll it
+would have been — `skipCount` times, `intervalMs` apart. Zero money at risk; zero effect
+on EV or future odds either way (rolls are independent regardless of how many you skip).
+
+Pacing is deliberately *conservative-by-default*, not adversarial: it runs at a fixed
+interval and, if the server ever rejects a call, backs off additively (`backoffMs` added
+per consecutive rejection, capped at `maxBackoffMs`) and keeps retrying slower rather than
+searching for the fastest rate it can get away with. If you get repeated rejections even
+at a slow pace, raise `intervalMs` — that's the site telling you to slow down, not an
+obstacle to route around. `maxConsecutiveErrors` hard-stops the script instead of retrying
+forever.
+
+Alerts, in increasing order of noise:
+- Every skip logs its position in the queue: `[#done/skipCount]`.
+- A skip landing at/above `highMultiplier` gets a `notify()` + log line.
+- A skip landing at/above `target` gets a louder `notify()` + banner — you named this
+  multiplier as the one you care about, so it's flagged harder.
+- After `predictStreak` consecutive sub-target skips, a "watch" alert fires and the
+  script pauses `predictPauseMs` before continuing.
+
+**On the "predict the next target roll and pause before it" ask specifically:** that's
+not implemented as literally requested, because it isn't possible. Bustadice commits to
+its server seed by publishing only its SHA-256 hash up front; the seed itself — which is
+what actually determines the next roll via `HMAC-SHA256(serverSeed, clientSeed|nonce)` —
+stays secret until you rotate it. Nobody, including the player, can compute a roll before
+it happens. The `predictStreak` watch trigger above is the honest substitute: it's a
+heuristic checkpoint ("you said to watch for a run this long, here it is"), explicitly
+logged as not a prediction, because the odds on the next roll are unchanged by any streak
+that preceded it — the same gambler's-fallacy caveat the skill's own streak-hunter
+strategy carries.
 
 ## Before going live
 
