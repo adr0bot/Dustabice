@@ -50,6 +50,17 @@ const startBalance = this.balance;
 const roundBet = sats => Math.max(100, Math.round(sats / 100) * 100);
 const bits = s => (s / 100).toFixed(2);
 
+// notify() is documented as a bare global, but live testing shows it can
+// throw "Can't find variable: notify" in some contexts — an uncaught
+// ReferenceError there would crash the whole script before this.stop() runs.
+// Route every alert through this helper so a missing notify() degrades to a
+// log line instead of killing the script mid-session.
+const alert = msg => {
+    try { notify(msg); return; } catch (e) {}
+    try { this.notify(msg); return; } catch (e) {}
+    this.log(`[ALERT] ${msg}`);
+};
+
 let bet = roundBet(config.baseBet.value);
 let bets = 0, wins = 0, streak = 0;
 let vault = 0;        // satoshis currently earmarked for a moonshot
@@ -61,9 +72,9 @@ this.log(`start | balance=${bits(startBalance)} bits | grind p(win)=${(99 / conf
 while (true) {
     // --- brakes, checked before risking the next bet ---
     const pnl = this.balance - startBalance;
-    if (pnl <= -config.stopLoss.value)   { notify(`STOP LOSS hit: ${bits(pnl)} bits`); break; }
-    if (pnl >=  config.takeProfit.value) { notify(`TAKE PROFIT hit: +${bits(pnl)} bits`); break; }
-    if (bet > this.balance)              { notify(`Balance can't cover next grind bet (${bits(bet)} bits)`); break; }
+    if (pnl <= -config.stopLoss.value)   { alert(`STOP LOSS hit: ${bits(pnl)} bits`); break; }
+    if (pnl >=  config.takeProfit.value) { alert(`TAKE PROFIT hit: +${bits(pnl)} bits`); break; }
+    if (bet > this.balance)              { alert(`Balance can't cover next grind bet (${bits(bet)} bits)`); break; }
 
     // --- optional seed rotation (verification hygiene only; no EV effect) ---
     if (config.rotateEvery.value > 0 && bets > 0 && bets % config.rotateEvery.value === 0) {
@@ -93,7 +104,7 @@ while (true) {
             consecutiveErrors++;
             this.log(`moonshot rejected: ${err && err.message || err} — releasing vault back to grind`);
             vault = 0;
-            if (consecutiveErrors >= 5) { notify(`stopping: ${consecutiveErrors} consecutive bet rejections`); break; }
+            if (consecutiveErrors >= 5) { alert(`stopping: ${consecutiveErrors} consecutive bet rejections`); break; }
             await new Promise(r => setTimeout(r, 2000));
             continue;
         }
@@ -112,7 +123,7 @@ while (true) {
     } catch (err) {
         consecutiveErrors++;
         this.log(`bet rejected: ${err && err.message || err} — retrying in 2s`);
-        if (consecutiveErrors >= 5) { notify(`stopping: ${consecutiveErrors} consecutive bet rejections`); break; }
+        if (consecutiveErrors >= 5) { alert(`stopping: ${consecutiveErrors} consecutive bet rejections`); break; }
         await new Promise(r => setTimeout(r, 2000));
         continue;
     }

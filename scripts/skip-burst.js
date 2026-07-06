@@ -39,8 +39,8 @@ var config = {
 //
 // Alerts:
 //   - Every skip logs its position in the queue (#done/skipCount).
-//   - Any skipped roll >= `highMultiplier` gets a notify() alert.
-//   - Any skipped roll >= `target` gets a louder notify() + log banner — you
+//   - Any skipped roll >= `highMultiplier` gets an alert.
+//   - Any skipped roll >= `target` gets a louder alert + log banner — you
 //     told the script this multiplier matters, so a skip landing on/above it
 //     is flagged harder than a generic high roll.
 //   - "Predicted target roll, paused right before it": NOT IMPLEMENTED AS
@@ -59,6 +59,17 @@ var config = {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// notify() is documented as a bare global, but live testing shows it can
+// throw "Can't find variable: notify" in some contexts — an uncaught
+// ReferenceError there would crash the whole script mid-run. Route every
+// alert through this helper so a missing notify() degrades to a log line
+// instead of killing the script.
+const alert = msg => {
+    try { notify(msg); return; } catch (e) {}
+    try { this.notify(msg); return; } catch (e) {}
+    this.log(`[ALERT] ${msg}`);
+};
+
 let done = 0, errors = 0, consecutiveErrors = 0, subTargetStreak = 0;
 let delay = config.intervalMs.value;
 
@@ -67,7 +78,7 @@ this.log(`start | ${config.skipCount.value} skips planned, ${config.intervalMs.v
 while (done < config.skipCount.value) {
     // --- heuristic watch checkpoint, fired BEFORE the skip that completes the streak ---
     if (subTargetStreak >= config.predictStreak.value) {
-        notify(`WATCH: ${subTargetStreak} skips in a row under ${config.target.value}x — next roll's odds are unchanged, this is not a prediction`);
+        alert(`WATCH: ${subTargetStreak} skips in a row under ${config.target.value}x — next roll's odds are unchanged, this is not a prediction`);
         this.log(`!!!!! WATCH TRIGGER: ${subTargetStreak} consecutive sub-target skips — pausing ${config.predictPauseMs.value}ms — odds on the next roll are exactly p=${(99 / config.target.value).toFixed(2)}%, same as always !!!!!`);
         await sleep(config.predictPauseMs.value);
         subTargetStreak = 0;
@@ -83,14 +94,14 @@ while (done < config.skipCount.value) {
 
         if (result.multiplier >= config.target.value) {
             subTargetStreak = 0;
-            notify(`TARGET SKIPPED: roll was ${result.multiplier}x >= target ${config.target.value}x`);
+            alert(`TARGET SKIPPED: roll was ${result.multiplier}x >= target ${config.target.value}x`);
             this.log(`***** TARGET HIT WHILE SKIPPING: ${result.multiplier}x (target ${config.target.value}x) at skip #${done} *****`);
         } else {
             subTargetStreak++;
         }
 
         if (result.multiplier >= config.highMultiplier.value) {
-            notify(`High multiplier skipped: ${result.multiplier}x`);
+            alert(`High multiplier skipped: ${result.multiplier}x`);
             this.log(`*** HIGH MULTIPLIER SKIPPED: ${result.multiplier}x (threshold ${config.highMultiplier.value}x) at skip #${done} ***`);
         }
     } catch (err) {
@@ -98,7 +109,7 @@ while (done < config.skipCount.value) {
         delay = Math.min(config.maxBackoffMs.value, delay + config.backoffMs.value);
         this.log(`skip rejected: ${err && err.message || err} — backing off to ${delay}ms`);
         if (consecutiveErrors >= config.maxConsecutiveErrors.value) {
-            notify(`stopping: ${consecutiveErrors} consecutive skip rejections`);
+            alert(`stopping: ${consecutiveErrors} consecutive skip rejections`);
             break;
         }
     }
