@@ -134,27 +134,42 @@ ratio: P(hit TP first) ≈ SL/(SL+TP) before edge drag).
 ## `skip-burst.js`
 
 A session/iteration/roll telemetry harness that tests one specific hunch: that betting
-target `T` after `skips + 1 ≈ T` sub-target skips wins more than baseline. **It places
-real wagers** (unlike an earlier no-money version of this script), so it carries the
-same mandatory stop-loss/take-profit brakes as `profit-vault-ladder.js`.
+target `T` after `skips + 1 ≈ T` sub-target skips wins more than baseline. **It never
+calls `this.bet()` — wagering is manual, entirely in your hands.** The script automates
+the skip phase and the bookkeeping, then hands off: it alerts you to place a bet yourself
+and waits.
 
 Data model — sessions contain iterations contain rolls:
 - **Session**: one script run, from this Start press to the next. `sessionIndex` and
   `globalRollIndex` persist across restarts via `localStorage` (best-effort — if
   unavailable in your context, you get one WARNING log and both counters just restart at
   1/0 every run instead of erroring out).
-- **Iteration**: one skip-then-wager cycle — skip `S` times, then place one real wager at
-  `target`. `iterationIndex` and `rollIndexInSession` reset every session.
-- **Roll**: one `this.skip()` or `this.bet()` call. Every roll logs its full address —
-  `[S<session> I<iteration> R<rollInSession> G<globalRoll>] {...attributes}` — so any
-  single event is exactly locatable, e.g. "session 1, iteration 4, roll 9."
+- **Iteration**: one skip-then-your-bet cycle — skip `S` times, alert you to wager
+  manually at `target`, wait. `iterationIndex` and `rollIndexInSession` reset every
+  session.
+- **Roll**: one `this.skip()` call, or one inferred manual-bet event. Every roll logs its
+  full address — `[S<session> I<iteration> R<rollInSession> G<globalRoll>]
+  {...attributes}` — so any single event is exactly locatable, e.g. "session 1, iteration
+  4, roll 9."
+
+**Manual bet detection is best-effort, not verified.** After alerting you, the script
+polls `this.balance` every `pollIntervalMs` (up to `manualPauseMs`, 0 = wait forever) and
+infers a win/loss from any change. The API reference documents `this.balance` as "updated
+only after `this.bet` calls" — there's no documented guarantee it reflects a bet you place
+manually through the site UI in real time. If it turns out `this.balance` doesn't track
+manual bets promptly on the live site, the inferred win/loss will be wrong or delayed —
+watch the log against what you actually see happen. `stopLoss`/`takeProfit` are advisory
+for the same reason: they stop the script from suggesting further bets once your observed
+balance has moved that far, but can't prevent a bet you place yourself.
 
 Tuning search: iteration 1 of every session starts at `S = target - 1` (the hunch's
-anchor) and logs its outcome as `[S<n> ONSET]`. On a loss, later iterations probe outward
-from the anchor in a `+1, -1, +2, -2, ...` pattern (step = `tuneStep`, capped by
-`maxSkipsPerIteration`); a win re-anchors the search there and the next iteration retests
-it for reproducibility. **This is a hill-search over the hypothesis, not a validated
-edge** — a 2.3-million-trial real-seed test of exactly the T=10/S=9 case (see
+anchor) and logs its outcome as `[S<n> ONSET]`. On an inferred loss, later iterations
+probe outward from the anchor in a `+1, -1, +2, -2, ...` pattern (step = `tuneStep`,
+capped by `maxSkipsPerIteration`); an inferred win re-anchors the search there and the
+next iteration retests it for reproducibility. If no balance change is detected before
+`manualPauseMs` elapses, the iteration is logged as `no-bet-detected` and the search
+position holds — no guessing. **This is a hill-search over the hypothesis, not a
+validated edge** — a 2.3-million-trial real-seed test of exactly the T=10/S=9 case (see
 `tools/pattern-test.js`) measured a 9.928% win rate on the "10th roll after 9 skips" bet
 against a 9.898–9.900% baseline, comfortably inside the confidence interval. Expect the
 search to wander without converging, because there's nothing there to converge on; the
@@ -163,7 +178,7 @@ telemetry is honest regardless of what it finds.
 Alerts (all routed through a local `alert()` helper — see "notify() note" below):
 - A skip landing at/above `highMultiplier` during the skip phase.
 - A skip that would have hit `target` had it been a real bet (i.e. you skipped a winner).
-- A wager landing at/above `highMultiplier`.
+- "READY TO BET" at the end of every skip phase, with the suggested target and size.
 
 **`notify()` note:** the API reference documents `notify()` as a bare global, but live
 testing surfaced `ReferenceError: Can't find variable: notify` in practice — calling it
@@ -171,14 +186,14 @@ unguarded would crash the whole script mid-run. Every alert here goes through a 
 `alert()` wrapper that tries `notify()`, then `this.notify()`, then falls back to
 `this.log()`, so a missing `notify` degrades gracefully instead of killing the session.
 
-**Backtesting this one:** `tools/backtest.js` works for functional sanity checks, but
-keep `--sessions` small (1-5). Every skip and wager is paced with a real `setTimeout`
-(correct for respecting a live rate limit), and even with delays collapsed to ~0ms by the
-harness, scheduling that many real timer callbacks adds up — a single full session at
-default config (200 iterations, ~12 skips/iteration average) takes ~3 real seconds, so
-500 sessions is closer to 25 minutes, not a hang. For the actual statistical question
-(does this pattern have an edge), use `tools/pattern-test.js` instead — it operates
-directly on the roll sequence with no pacing and is what produced the numbers above.
+**Backtesting this one:** `tools/backtest.js` works for small functional sanity checks,
+but its mock `this.balance` only changes on the mock's own `this.bet()` calls — since
+this script never calls `this.bet()`, the manual-bet-detection path won't exercise itself
+under that harness. Correctness was instead verified with a small standalone test harness
+that simulates a "manual bettor" mutating balance during the wait window (not committed —
+throwaway). For the actual statistical question (does this pattern have an edge), use
+`tools/pattern-test.js` — it operates directly on the roll sequence with no pacing and is
+what produced the numbers above.
 
 ## Before going live
 
