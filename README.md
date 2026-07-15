@@ -13,11 +13,14 @@ how fat the tails are. That's what this one does — it does not, and cannot, cr
 
 - `scripts/profit-vault-ladder.js` — the betting strategy, ready to paste into the
   Bustadice script editor.
-- `scripts/skip-burst.js` — a no-money utility that fires `this.skip()` a configured
-  number of times at a paced interval, with progress counter and alerts. See below.
+- `scripts/skip-burst.js` — session/iteration/roll telemetry that tests and self-tunes
+  around the "skips+1 ≈ target" hunch, wagering real money on it. See below.
 - `tools/backtest.js` — zero-dependency Node harness (Monte Carlo, provably-fair seeded
-  replay, or historical roll replay) used to validate the betting script before risking
+  replay, or historical roll replay) used to validate the betting scripts before risking
   real money.
+- `tools/pattern-test.js` — statistical test of the "skips+1 ≈ target" hunch directly
+  against the real HMAC-SHA256 provably-fair algorithm, independent of any script's
+  pacing. This is what actually answers whether the pattern has an edge.
 
 ## The strategy
 
@@ -130,36 +133,52 @@ ratio: P(hit TP first) ≈ SL/(SL+TP) before edge drag).
 
 ## `skip-burst.js`
 
-Fires `this.skip()` — the API's own no-wager way to consume a nonce and see what roll it
-would have been — `skipCount` times, `intervalMs` apart. Zero money at risk; zero effect
-on EV or future odds either way (rolls are independent regardless of how many you skip).
+A session/iteration/roll telemetry harness that tests one specific hunch: that betting
+target `T` after `skips + 1 ≈ T` sub-target skips wins more than baseline. **It places
+real wagers** (unlike an earlier no-money version of this script), so it carries the
+same mandatory stop-loss/take-profit brakes as `profit-vault-ladder.js`.
 
-Pacing is deliberately *conservative-by-default*, not adversarial: it runs at a fixed
-interval and, if the server ever rejects a call, backs off additively (`backoffMs` added
-per consecutive rejection, capped at `maxBackoffMs`) and keeps retrying slower rather than
-searching for the fastest rate it can get away with. If you get repeated rejections even
-at a slow pace, raise `intervalMs` — that's the site telling you to slow down, not an
-obstacle to route around. `maxConsecutiveErrors` hard-stops the script instead of retrying
-forever.
+Data model — sessions contain iterations contain rolls:
+- **Session**: one script run, from this Start press to the next. `sessionIndex` and
+  `globalRollIndex` persist across restarts via `localStorage` (best-effort — if
+  unavailable in your context, you get one WARNING log and both counters just restart at
+  1/0 every run instead of erroring out).
+- **Iteration**: one skip-then-wager cycle — skip `S` times, then place one real wager at
+  `target`. `iterationIndex` and `rollIndexInSession` reset every session.
+- **Roll**: one `this.skip()` or `this.bet()` call. Every roll logs its full address —
+  `[S<session> I<iteration> R<rollInSession> G<globalRoll>] {...attributes}` — so any
+  single event is exactly locatable, e.g. "session 1, iteration 4, roll 9."
 
-Alerts, in increasing order of noise:
-- Every skip logs its position in the queue: `[#done/skipCount]`.
-- A skip landing at/above `highMultiplier` gets a `notify()` + log line.
-- A skip landing at/above `target` gets a louder `notify()` + banner — you named this
-  multiplier as the one you care about, so it's flagged harder.
-- After `predictStreak` consecutive sub-target skips, a "watch" alert fires and the
-  script pauses `predictPauseMs` before continuing.
+Tuning search: iteration 1 of every session starts at `S = target - 1` (the hunch's
+anchor) and logs its outcome as `[S<n> ONSET]`. On a loss, later iterations probe outward
+from the anchor in a `+1, -1, +2, -2, ...` pattern (step = `tuneStep`, capped by
+`maxSkipsPerIteration`); a win re-anchors the search there and the next iteration retests
+it for reproducibility. **This is a hill-search over the hypothesis, not a validated
+edge** — a 2.3-million-trial real-seed test of exactly the T=10/S=9 case (see
+`tools/pattern-test.js`) measured a 9.928% win rate on the "10th roll after 9 skips" bet
+against a 9.898–9.900% baseline, comfortably inside the confidence interval. Expect the
+search to wander without converging, because there's nothing there to converge on; the
+telemetry is honest regardless of what it finds.
 
-**On the "predict the next target roll and pause before it" ask specifically:** that's
-not implemented as literally requested, because it isn't possible. Bustadice commits to
-its server seed by publishing only its SHA-256 hash up front; the seed itself — which is
-what actually determines the next roll via `HMAC-SHA256(serverSeed, clientSeed|nonce)` —
-stays secret until you rotate it. Nobody, including the player, can compute a roll before
-it happens. The `predictStreak` watch trigger above is the honest substitute: it's a
-heuristic checkpoint ("you said to watch for a run this long, here it is"), explicitly
-logged as not a prediction, because the odds on the next roll are unchanged by any streak
-that preceded it — the same gambler's-fallacy caveat the skill's own streak-hunter
-strategy carries.
+Alerts (all routed through a local `alert()` helper — see "notify() note" below):
+- A skip landing at/above `highMultiplier` during the skip phase.
+- A skip that would have hit `target` had it been a real bet (i.e. you skipped a winner).
+- A wager landing at/above `highMultiplier`.
+
+**`notify()` note:** the API reference documents `notify()` as a bare global, but live
+testing surfaced `ReferenceError: Can't find variable: notify` in practice — calling it
+unguarded would crash the whole script mid-run. Every alert here goes through a small
+`alert()` wrapper that tries `notify()`, then `this.notify()`, then falls back to
+`this.log()`, so a missing `notify` degrades gracefully instead of killing the session.
+
+**Backtesting this one:** `tools/backtest.js` works for functional sanity checks, but
+keep `--sessions` small (1-5). Every skip and wager is paced with a real `setTimeout`
+(correct for respecting a live rate limit), and even with delays collapsed to ~0ms by the
+harness, scheduling that many real timer callbacks adds up — a single full session at
+default config (200 iterations, ~12 skips/iteration average) takes ~3 real seconds, so
+500 sessions is closer to 25 minutes, not a hang. For the actual statistical question
+(does this pattern have an edge), use `tools/pattern-test.js` instead — it operates
+directly on the roll sequence with no pacing and is what produced the numbers above.
 
 ## Before going live
 
