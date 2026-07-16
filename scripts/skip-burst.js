@@ -1,159 +1,65 @@
 var config = {
-    header:               { label: "— Hunch: (skips+1) ≈ target —",                    type: "noop" },
-    target:               { label: "Target multiplier (T)",                           type: "multiplier", value: 10 },
-    startSkips:           { label: "Iteration-1 skip count (0 = auto, T-1)",           type: "number", value: 0 },
-    suggestedBetSize:     { label: "Suggested wager size to show you (bits)",          type: "balance", value: 1 },
+    header:               { label: "— What to watch for —",                 type: "noop" },
+    target:               { label: "Target multiplier to track",           type: "multiplier", value: 10 },
+    highMultiplier:       { label: "\"High roll\" threshold to track",     type: "multiplier", value: 20 },
 
-    header2:              { label: "— Search tuning —",                                type: "noop" },
-    tuneStep:              { label: "Skip-count search step after an inferred loss",    type: "number", value: 1 },
-    maxSkipsPerIteration: { label: "Hard cap on skips in one iteration",               type: "number", value: 50 },
+    header2:              { label: "— Run —",                              type: "noop" },
+    maxSkips:             { label: "Total skips to run (0 = unlimited)",   type: "number", value: 0 },
+    intervalMs:           { label: "Delay between skips (ms)",             type: "number", value: 250 },
+    reportEvery:          { label: "Print a frequency summary every N skips", type: "number", value: 50 },
+    shortRunWindow:       { label: "Window size for short-run frequency",  type: "number", value: 100 },
 
-    header3:              { label: "— Manual bet handoff —",                           type: "noop" },
-    manualPauseMs:        { label: "Max wait for you to bet, ms (0 = wait forever)",   type: "number", value: 20000 },
-    pollIntervalMs:       { label: "How often to check balance while waiting (ms)",    type: "number", value: 1000 },
-
-    header4:              { label: "— Session budget & advisory limits —",             type: "noop" },
-    maxIterations:        { label: "Max iterations this session (0 = unlimited)",      type: "number", value: 200 },
-    stopLoss:             { label: "Stop suggesting bets once down this much (bits)",  type: "balance", value: 100 },
-    takeProfit:           { label: "Stop suggesting bets once up this much (bits)",    type: "balance", value: 300 },
-
-    header5:              { label: "— Alerts —",                                       type: "noop" },
-    highMultiplier:       { label: "\"High multiplier\" alert threshold",              type: "multiplier", value: 20 },
-
-    header6:              { label: "— Pacing / backoff (skips only) —",                type: "noop" },
-    intervalMs:           { label: "Delay between skips (ms)",                         type: "number", value: 250 },
-    backoffMs:            { label: "Extra delay added per rejection (ms)",             type: "number", value: 1000 },
-    maxBackoffMs:         { label: "Cap on backoff delay (ms)",                        type: "number", value: 15000 },
-    maxConsecutiveErrors: { label: "Abort after this many rejections in a row",        type: "number", value: 8 },
-
-    header7:              { label: "— Debug —",                                        type: "noop" },
-    resetCounters:        { label: "Reset session/global counters before this run",    type: "checkbox", value: false }
+    header3:              { label: "— Backoff on rejection —",             type: "noop" },
+    backoffMs:            { label: "Extra delay added per rejection (ms)", type: "number", value: 1000 },
+    maxBackoffMs:         { label: "Cap on backoff delay (ms)",            type: "number", value: 15000 },
+    maxConsecutiveErrors: { label: "Abort after this many rejections in a row", type: "number", value: 8 }
 };
 
 // -----------------------------------------------------------------------------
-// SKIP BURST — session / iteration / roll hunch tuner (manual betting)
+// SKIP TRACKER
 //
-// This script never calls this.bet() — wagering stays entirely in your hands.
-// It automates the skip phase and the bookkeeping, then hands off to you:
+// No wagering, no sessions, no tuning search — just this.skip() in a loop,
+// logging every skipped roll that clears `highMultiplier` or `target`, and
+// periodically reporting the actual frequencies (overall and in a recent
+// short-run window) so you can compare them against theory, and against
+// whatever pattern your own manual tracking has shown you.
 //
-//   SESSION   one script run, from this Start press to the next Start press.
-//   ITERATION one skip-then-YOUR-bet cycle: the script skips `S` times, alerts
-//             you to place a manual wager at `target`, then waits.
-//   ROLL      one this.skip() call, OR one inferred manual-bet event. Every
-//             roll is tagged with its full address: session, iteration,
-//             roll-in-session, and roll-globally-ever.
-//
-// Indexing:
-//   sessionIndex       persists across sessions (survives a restart), read
-//                       from localStorage and incremented on every Start.
-//   iterationIndex      resets to 0 at the start of every session.
-//   rollIndexInSession   resets to 0 at the start of every session, increments
-//                       across iterations within that session.
-//   globalRollIndex     persists across sessions, never resets.
-// Every roll is logged as `[S<session> I<iteration> R<rollInSession>
-// G<globalRoll>] {...attributes}` so any single event can be located exactly.
-//
-// Persistence: there's no documented cross-run storage API for Bustadice
-// scripts, so this uses the browser's localStorage guarded by try/catch. If
-// unavailable in your context, counters silently reset to 1/0 every run
-// instead of surviving restarts — one WARNING log line, everything else
-// still works.
-//
-// MANUAL BET DETECTION — read this before trusting the tuning output:
-// after alerting you, the script polls this.balance every `pollIntervalMs`
-// looking for a change, and infers win (balance up) or loss (balance down)
-// from its sign. The API reference documents this.balance as "updated only
-// after this.bet calls" — i.e. there is no documented guarantee it reflects
-// a bet placed manually through the site UI in real time. This detection is
-// therefore best-effort, not verified. If it turns out this.balance doesn't
-// track your manual bets promptly on the live site, the delta/won values
-// logged here will be wrong or delayed — watch the log against what you
-// actually see happen and treat the inferred data with that caveat in mind.
-//
-// The hunch being tested: at target T, betting after S = T-1 skips
-// (i.e. "skips+1 ≈ T") wins more than baseline. Iteration 1 of every session
-// starts at that anchor and logs its outcome as the ONSET delta. On an
-// inferred loss, later iterations probe outward from the anchor in a
-// +1,-1,+2,-2,... pattern (step = `tuneStep`); an inferred win re-anchors the
-// search there and the next iteration retests it for reproducibility. This
-// is a hill-search over your hypothesis, not a proven exploit — a large
-// real-seed test of exactly the T=10/S=9 case (see tools/pattern-test.js)
-// showed 9.928% observed vs. 9.898-9.900% theoretical, well inside the
-// confidence interval, i.e. no detectable edge. Build the search anyway,
-// look at your own data; the telemetry here is honest either way.
-//
-// Because the script no longer controls the wager, stopLoss/takeProfit are
-// advisory: they stop the script from suggesting further bets once your
-// observed balance has moved that far, but they cannot prevent a manual bet
-// you place yourself.
+// What "frequency" means here: p = 0.99 / multiplier is each roll's real,
+// fixed win probability — independent of everything that came before it.
+// Over any given window, the OBSERVED rate will wander above and below that
+// number by chance alone; short streaks of both hot and cold windows are the
+// expected texture of a random process, not evidence on their own. The
+// numbers below are exactly what they are, though — real counts and real
+// gaps, not a claim about what they mean. Watch the short-run vs. long-run
+// vs. theoretical numbers over enough skips and draw your own conclusion.
 // -----------------------------------------------------------------------------
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const roundBet = sats => Math.max(100, Math.round(sats / 100) * 100);
-const bits = s => (s / 100).toFixed(2);
 
-// notify() is documented as a bare global, but live testing shows it can
-// throw "Can't find variable: notify" in some contexts — an uncaught
-// ReferenceError there would crash the whole script mid-run. Route every
-// alert through this helper so a missing notify() degrades to a log line.
 const alert = msg => {
     try { notify(msg); return; } catch (e) {}
     try { this.notify(msg); return; } catch (e) {}
     this.log(`[ALERT] ${msg}`);
 };
 
-// --- cross-session persistence (best-effort) ---
-const STORAGE_KEY = "bustadice_skipburst_state_v2";
-let persistenceOk = true;
-const loadPersisted = () => {
-    try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        return raw ? JSON.parse(raw) : null;
-    } catch (e) { persistenceOk = false; return null; }
-};
-const savePersisted = state => {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) { persistenceOk = false; }
-};
+const T = config.target.value;
+const H = config.highMultiplier.value;
+const pTarget = 99 / T;   // percent
+const pHigh = 99 / H;     // percent
 
-let prior = config.resetCounters.value ? null : loadPersisted();
-if (!prior) prior = { sessionIndex: 0, globalRollIndex: 0 };
-const sessionIndex = prior.sessionIndex + 1;
-let globalRollIndex = prior.globalRollIndex;
-savePersisted({ sessionIndex, globalRollIndex }); // reserve this session's index immediately
-if (!persistenceOk) {
-    this.log(`WARNING: localStorage unavailable — session/global counters will NOT persist across restarts; every run starts at session 1 / global 0.`);
-}
+let totalSkips = 0, errors = 0, consecutiveErrors = 0, delay = config.intervalMs.value;
+let lastSummaryAt = 0;
 
-// --- session-local state ---
-const sessionStartBalance = this.balance;
-let iterationIndex = 0;
-let rollIndexInSession = 0;
-let errors = 0, consecutiveErrors = 0;
-let delay = config.intervalMs.value;
+let targetHits = 0, lastTargetHitAt = 0;
+let targetGapCount = 0, targetGapSum = 0, targetGapMin = Infinity, targetGapMax = 0;
 
-const suggestedBet = roundBet(config.suggestedBetSize.value);
-const baseSkipsInit = config.startSkips.value > 0
-    ? Math.round(config.startSkips.value)
-    : Math.max(0, Math.round(config.target.value - 1));
+let highHits = 0, lastHighHitAt = 0;
+let highGapCount = 0, highGapSum = 0, highGapMin = Infinity, highGapMax = 0;
 
-let baseSkip = baseSkipsInit;   // current search anchor
-let probeIndex = 0;             // 0 = testing the anchor itself
-const probeOffset = k => {
-    if (k === 0) return 0;
-    const n = Math.ceil(k / 2);
-    const sign = (k % 2 === 1) ? 1 : -1;
-    return sign * n * config.tuneStep.value;
-};
-const clampSkips = s => Math.max(0, Math.min(config.maxSkipsPerIteration.value, s));
-let skipsNext = clampSkips(baseSkip + probeOffset(probeIndex));
+let subTargetStreak = 0, longestSubTargetStreak = 0;
 
-const recordRoll = () => {
-    rollIndexInSession++;
-    globalRollIndex++;
-    savePersisted({ sessionIndex, globalRollIndex });
-};
+const window_ = []; // recent booleans: did this skip clear target?
 
-// retries a skip call with backoff; throws only after maxConsecutiveErrors in a row
 const attempt = async (actionFn, label) => {
     for (;;) {
         try {
@@ -174,86 +80,73 @@ const attempt = async (actionFn, label) => {
     }
 };
 
-this.log(`[SESSION ${sessionIndex} START] target=${config.target.value}x anchorSkips=${baseSkip} suggestedBet=${bits(suggestedBet)} bits balance=${bits(sessionStartBalance)} bits globalRollsSoFar=${globalRollIndex}`);
+const printSummary = () => {
+    const overallTargetPct = 100 * targetHits / totalSkips;
+    const overallHighPct = 100 * highHits / totalSkips;
+    const shortRunPct = 100 * window_.reduce((a, b) => a + b, 0) / window_.length;
+    const avgTargetGap = targetGapCount ? (targetGapSum / targetGapCount).toFixed(1) : "n/a";
+    const avgHighGap = highGapCount ? (highGapSum / highGapCount).toFixed(1) : "n/a";
+    this.log(
+        `[SUMMARY @ ${totalSkips} skips] ` +
+        `target(${T}x): hits=${targetHits} overall=${overallTargetPct.toFixed(2)}% ` +
+        `shortRun(${window_.length})=${shortRunPct.toFixed(2)}% theory=${pTarget.toFixed(2)}% ` +
+        `avgGap=${avgTargetGap} (theory ${(100 / pTarget).toFixed(1)}) minGap=${targetGapMin === Infinity ? "n/a" : targetGapMin} maxGap=${targetGapMax} ` +
+        `longestMissStreak=${longestSubTargetStreak} | ` +
+        `high(${H}x): hits=${highHits} overall=${overallHighPct.toFixed(2)}% theory=${pHigh.toFixed(2)}% avgGap=${avgHighGap}`
+    );
+};
 
-sessionLoop:
-while (true) {
-    const pnl = this.balance - sessionStartBalance;
-    if (pnl <= -config.stopLoss.value)   { alert(`Down ${bits(-pnl)} bits — pausing suggestions (stopLoss)`); break; }
-    if (pnl >=  config.takeProfit.value) { alert(`Up ${bits(pnl)} bits — pausing suggestions (takeProfit)`); break; }
-    if (config.maxIterations.value > 0 && iterationIndex >= config.maxIterations.value) {
-        this.log(`iteration budget (${config.maxIterations.value}) reached`); break;
-    }
+this.log(`start | tracking target=${T}x (theory ${pTarget.toFixed(2)}%) and high=${H}x (theory ${pHigh.toFixed(2)}%) | window=${config.shortRunWindow.value}`);
 
-    iterationIndex++;
-    const S = skipsNext;
+while (config.maxSkips.value === 0 || totalSkips < config.maxSkips.value) {
+    let result;
+    try { result = await attempt(() => this.skip(), "skip"); }
+    catch (e) { break; }
 
-    // --- skip phase (automatic, no money) ---
-    for (let k = 0; k < S; k++) {
-        let skipRes;
-        try { skipRes = await attempt(() => this.skip(), "skip"); }
-        catch (e) { break sessionLoop; }
-        recordRoll();
-        this.log(`[S${sessionIndex} I${iterationIndex} R${rollIndexInSession} G${globalRollIndex}] ${JSON.stringify({ type: "skip", multiplier: skipRes.multiplier })}`);
-        if (skipRes.multiplier >= config.target.value) {
-            alert(`iteration ${iterationIndex}: skip #${k + 1} would have hit target ${config.target.value}x (rolled ${skipRes.multiplier}x)`);
+    totalSkips++;
+    const m = result.multiplier;
+    const hitTarget = m >= T;
+    const hitHigh = m >= H;
+
+    if (hitTarget) {
+        targetHits++;
+        const gap = totalSkips - lastTargetHitAt;
+        if (lastTargetHitAt > 0) {
+            targetGapCount++; targetGapSum += gap;
+            if (gap < targetGapMin) targetGapMin = gap;
+            if (gap > targetGapMax) targetGapMax = gap;
         }
-        if (skipRes.multiplier >= config.highMultiplier.value) {
-            alert(`high multiplier skipped: ${skipRes.multiplier}x`);
-        }
-        await sleep(delay);
-    }
-
-    // --- manual bet handoff: alert, then wait — the script does NOT wager ---
-    const balanceBeforeBet = this.balance;
-    alert(`READY TO BET — iteration ${iterationIndex}: place a manual wager now at target ${config.target.value}x (suggested size ${bits(suggestedBet)} bits). You skipped ${S} in a row.`);
-    this.log(`[S${sessionIndex} I${iterationIndex}] WAITING FOR MANUAL BET — target=${config.target.value}x skips=${S} suggestedSize=${bits(suggestedBet)} bits`);
-
-    const waitStart = Date.now();
-    let balanceAfterBet = balanceBeforeBet;
-    while (true) {
-        await sleep(config.pollIntervalMs.value);
-        balanceAfterBet = this.balance;
-        if (balanceAfterBet !== balanceBeforeBet) break;
-        if (config.manualPauseMs.value > 0 && Date.now() - waitStart >= config.manualPauseMs.value) break;
-    }
-
-    recordRoll();
-    const betDelta = balanceAfterBet - balanceBeforeBet;
-    const betDetected = betDelta !== 0;
-    const onsetDelta = (S + 1) - config.target.value;
-
-    if (betDetected) {
-        const inferredWon = betDelta > 0;
-        this.log(`[S${sessionIndex} I${iterationIndex} R${rollIndexInSession} G${globalRollIndex}] ${JSON.stringify({
-            type: "wager(manual, inferred)", skips: S, target: config.target.value,
-            balanceDelta: betDelta, inferredWon, onsetDelta, balance: balanceAfterBet,
-            pnl: balanceAfterBet - sessionStartBalance, note: "outcome inferred from a balance change, not read from a bet result — see file header caveat"
-        })}`);
-        if (iterationIndex === 1) {
-            this.log(`[S${sessionIndex} ONSET] skips+1=${S + 1} target=${config.target.value} delta=${onsetDelta} inferredWon=${inferredWon}`);
-        }
-        if (inferredWon) {
-            baseSkip = S;
-            probeIndex = 0;
-            this.log(`[S${sessionIndex} I${iterationIndex}] INFERRED WIN — anchoring search on skips=${S}, retesting next iteration for reproducibility`);
-        } else {
-            probeIndex++;
-        }
+        lastTargetHitAt = totalSkips;
+        if (subTargetStreak > longestSubTargetStreak) longestSubTargetStreak = subTargetStreak;
+        subTargetStreak = 0;
+        this.log(`[#${totalSkips}] TARGET HIT x${m} (skipped) gap=${gap}`);
+        alert(`Target hit while skipping: x${m} (target ${T}x), gap=${gap} skips since last`);
     } else {
-        this.log(`[S${sessionIndex} I${iterationIndex} R${rollIndexInSession} G${globalRollIndex}] ${JSON.stringify({
-            type: "no-bet-detected", skips: S, target: config.target.value, onsetDelta,
-            note: `no balance change seen within ${config.manualPauseMs.value || "unbounded"}ms wait — assuming no bet was placed; search position unchanged`
-        })}`);
-        if (iterationIndex === 1) {
-            this.log(`[S${sessionIndex} ONSET] skips+1=${S + 1} target=${config.target.value} delta=${onsetDelta} inferredWon=n/a (no bet detected)`);
-        }
-        // no signal either way — keep probing the same spot next time rather than guessing
+        subTargetStreak++;
     }
-    skipsNext = clampSkips(baseSkip + probeOffset(probeIndex));
+
+    if (hitHigh) {
+        highHits++;
+        const gap = totalSkips - lastHighHitAt;
+        if (lastHighHitAt > 0) {
+            highGapCount++; highGapSum += gap;
+            if (gap < highGapMin) highGapMin = gap;
+            if (gap > highGapMax) highGapMax = gap;
+        }
+        lastHighHitAt = totalSkips;
+        this.log(`[#${totalSkips}] HIGH ROLL x${m} (skipped) gap=${gap}`);
+        alert(`High roll skipped: x${m} (threshold ${H}x)`);
+    }
+
+    window_.push(hitTarget ? 1 : 0);
+    if (window_.length > config.shortRunWindow.value) window_.shift();
+
+    if (totalSkips % config.reportEvery.value === 0) { printSummary(); lastSummaryAt = totalSkips; }
 
     await sleep(delay);
 }
 
-this.log(`[SESSION ${sessionIndex} SUMMARY] iterations=${iterationIndex} rollsThisSession=${rollIndexInSession} globalRollsAllTime=${globalRollIndex} rejections=${errors} finalBalance=${bits(this.balance)} bits pnl=${bits(this.balance - sessionStartBalance)} bits`);
+if (subTargetStreak > longestSubTargetStreak) longestSubTargetStreak = subTargetStreak;
+if (totalSkips !== lastSummaryAt) printSummary();
+this.log(`done | totalSkips=${totalSkips} rejections=${errors}`);
 await this.stop();
